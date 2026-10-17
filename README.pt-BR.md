@@ -68,8 +68,8 @@ Documentos PDF
 ### 1. Clone o repositório
 
 ```bash
-git clone https://github.com/seu-usuario/rag-api.git
-cd rag-api
+git clone https://github.com/devbelloni/RAG-with-FastAPI.git
+cd RAG-with-FastAPI
 ```
 
 ### 2. Crie e ative o ambiente virtual
