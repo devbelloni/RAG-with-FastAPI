@@ -1,108 +1,121 @@
-# RAG API: Question Answering over PDFs with LangChain, ChromaDB and Groq
+# RAG API: Question Answering over PDFs
 
+![CI](https://github.com/devbelloni/RAG-with-FastAPI/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688)
-![LangChain](https://img.shields.io/badge/LangChain-1C3C3C)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-A Retrieval-Augmented Generation (RAG) service that indexes PDF documents and answers
-natural-language questions grounded **only** in their content. It runs as a REST API
-(FastAPI, with automatic Swagger docs) or as an interactive terminal app.
+A Retrieval-Augmented Generation (RAG) service that indexes your PDF documents and answers
+natural-language questions **grounded only in their content**, citing the file and page of
+each source. Use it from the terminal or as a REST API with automatic Swagger docs.
 
 > Portuguese version: [README.pt-BR.md](README.pt-BR.md)
 
 ## How it works
 
 ```
-PDF files ──► chunking (1500 chars, 200 overlap)
-          ──► embeddings: all-MiniLM-L6-v2 (HuggingFace, local, no API cost)
-          ──► ChromaDB (local vector store)
-          ──► top-6 semantic search
-          ──► prompt enriched with retrieved context
-          ──► Llama 3.3 70B via Groq
-          ──► grounded answer
+PDFs ─► chunking (1500 chars, 200 overlap)
+     ─► local embeddings (all-MiniLM-L6-v2, HuggingFace)
+     ─► ChromaDB (persistent local vector store)
+
+question ─► top-k semantic search ─► grounded prompt ─► Llama 3.3 70B (Groq) ─► answer + sources
 ```
 
 Design choices:
 
 - **Local embeddings and vector store**: only the generation step calls an external API.
-- **Grounded answers**: the prompt instructs the model to answer only from the retrieved
-  context and to say so when nothing relevant is found, which reduces hallucination.
-- **Tuned retrieval**: chunk size and overlap were increased (500/50 to 1500/200) and `k`
-  raised from 3 to 6 to keep more context at chunk boundaries.
-
-## Stack
-
-| Tool | Role |
-|---|---|
-| LangChain | RAG pipeline orchestration |
-| Groq (Llama 3.3 70B) | LLM inference |
-| ChromaDB | Vector database |
-| HuggingFace sentence-transformers | Embeddings |
-| FastAPI + Uvicorn | REST API |
+- **Grounded answers**: the prompt tells the model to answer only from the retrieved context
+  and to say when nothing relevant was found, which limits hallucination.
+- **Source citations**: every answer lists the documents and pages that were retrieved.
+- **Lazy loading**: heavy libraries and the index load on the first question, so the API
+  starts fast and its HTTP layer is testable without them.
+- **Injected service**: the API depends on a small `Answerer` interface, so tests run with a fake.
+- **Configurable** through environment variables (chunk size, overlap, top-k, models, paths).
 
 ## Quick start
 
 ```bash
-git clone https://github.com/devbelloni/RAG-with-FastAPI.git
-cd RAG-with-FastAPI
-python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
-pip install -r requirements.txt
+git clone https://github.com/devbelloni/RAG-with-FastAPI.git && cd RAG-with-FastAPI
+python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
+pip install -e ".[dev]"
 
-cp .env.example .env        # add your GROQ_API_KEY (free at console.groq.com)
-# put your PDFs in ./docs
+cp .env.example .env          # add your GROQ_API_KEY (free at console.groq.com)
+cp your_documents/*.pdf docs/ # put PDFs in ./docs
 ```
 
-Terminal mode (also builds the index):
-
 ```bash
-python main.py
+rag-api ingest                # build the vector index
+rag-api chat                  # ask questions in the terminal
+rag-api serve                 # REST API at http://127.0.0.1:8000/docs
 ```
 
-API mode:
+Or with Docker:
 
 ```bash
-uvicorn api:app --reload
-# Swagger UI: http://localhost:8000/docs
+docker build -t rag-api . && docker run -p 8000:8000 --env-file .env -v "$PWD/docs:/app/docs" rag-api
 ```
 
 ## API
 
 `GET /` returns the service status.
 
-`POST /perguntar` asks a question about the indexed documents:
+`POST /perguntar` asks a question:
 
 ```json
 { "pergunta": "What is the conclusion of the study?" }
 ```
 
 ```json
-{ "pergunta": "What is the conclusion of the study?", "resposta": "According to the documents, ..." }
+{
+  "pergunta": "What is the conclusion of the study?",
+  "resposta": "According to the documents, ...",
+  "fontes": ["relatorio.pdf (page 12)", "relatorio.pdf (page 14)"]
+}
 ```
+
+Errors: `400` for an empty question, `422` for invalid input, `503` when there are no PDFs to index.
 
 ## Configuration
 
-| Parameter | Value | Description |
+| Variable | Default | Purpose |
 |---|---|---|
-| `chunk_size` | 1500 | Characters per chunk |
-| `chunk_overlap` | 200 | Overlap between chunks |
-| `k` | 6 | Chunks retrieved per query |
-| LLM | `llama-3.3-70b-versatile` | Generation model |
-| Embeddings | `all-MiniLM-L6-v2` | Local embedding model |
+| `GROQ_API_KEY` | required | LLM access |
+| `RAG_DOCS_DIR` | `docs` | Folder with PDFs |
+| `RAG_PERSIST_DIR` | `chroma_db` | Vector store location |
+| `RAG_CHUNK_SIZE` / `RAG_CHUNK_OVERLAP` | `1500` / `200` | Chunking |
+| `RAG_TOP_K` | `6` | Chunks retrieved per question |
+| `RAG_LLM_MODEL` | `llama-3.3-70b-versatile` | Groq model |
+| `RAG_EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Embedding model |
+
+## Tests
+
+```bash
+pytest -q && ruff check .
+```
+
+Nine tests cover prompt construction, source extraction, input validation, error mapping
+and configuration. They use a fake service, so they need no model, index or API key.
+The ingestion and LLM layer (`service.py`) needs the real dependencies and a Groq key, and
+is exercised by running the application.
+
+## Layout
+
+```
+src/rag_api/
+├── api.py        # FastAPI app factory
+├── service.py    # ingestion, retrieval and generation
+├── prompting.py  # prompt and source formatting (pure functions)
+├── config.py     # settings from environment
+└── cli.py        # ingest / chat / serve
+tests/
+```
 
 ## Roadmap
 
 - [ ] More formats (DOCX, TXT, CSV)
+- [ ] Retrieval evaluation (precision@k) with a labelled question set
+- [ ] API authentication and rate limiting
 - [ ] Streamlit front end
-- [ ] Multiple document collections
-- [ ] API authentication
-- [ ] Deployment (Railway or Render)
-- [ ] Retrieval evaluation (precision@k) and automated tests
-
-## Security
-
-`GROQ_API_KEY` is read from `.env`, which is git-ignored. The `chroma_db/` index is
-generated locally and is not versioned.
 
 ## Author
 
